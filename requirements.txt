@@ -1,0 +1,14 @@
+# --- runtime ---
+openai>=1.60,<3          # LLM client; the SDK retries connection/429/5xx internally
+python-dotenv>=1.0,<2    # .env loading
+tiktoken>=0.7,<1         # accurate token counting (auto-falls back to chars/4)
+pypdf>=5.0,<7            # PDF loader; pure Python, no C extensions
+
+# --- dev / tests (the default suite is fully offline) ---
+pytest>=8.0,<10
+
+# Deliberately absent:
+#   python-docx  -> the .docx loader uses stdlib zipfile + ElementTree, avoiding lxml
+#   tenacity     -> the OpenAI SDK already retries; the only app-level retry is semantic
+#   pydantic     -> required-key validation is enough for four small JSON schemas
+#   numpy / any vector store -> retrieval here is lexical by design

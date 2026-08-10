@@ -1,0 +1,9 @@
+# Configuration only -- this project is run from a checkout, not installed as a package.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: hits the real OpenAI API; requires OPENAI_API_KEY and costs money",
+]
+# The default `pytest` run is offline and free. Opt in with: pytest -m integration
+addopts = "-m 'not integration' -q"
