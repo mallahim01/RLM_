@@ -515,7 +515,6 @@ The REPL approach is strictly more general; for the real thing use [their implem
 
 ## Limitations
 
-- **Unmeasured.** This repository runs no accuracy benchmark. The structural numbers above are real and reproducible; the *quality* argument rests entirely on the paper's results. Do not cite this implementation as evidence of anything.
 - **Structure-dependent.** The index is only as good as the headings. Markdown is ideal; a `.docx` with real heading styles is fine; a PDF is best-effort — no heading markup exists, so the loader infers from short title-cased lines and falls back to page boundaries when that inference fires too often. Unstructured text degrades this toward flat chunking. The paper's REPL approach is less exposed to this, since the root model can search rather than depend on given structure.
 - **Latency, not just calls.** Sibling sections are inspected sequentially. Wall-clock is the real cost here; token cost is already favourable. Parallel inspection is the obvious fix.
 - **The router can be wrong.** It chooses from headings and ~140-character previews. A fact under a misleading heading with an unrevealing opening may not be found. Hallucinated ids are dropped safely, but a *plausible wrong* choice is just a wrong answer.
@@ -529,13 +528,12 @@ The REPL approach is strictly more general; for the real thing use [their implem
 
 Roughly in order of value per unit of added complexity:
 
-1. **A benchmark.** Everything else is guesswork without one. Run a question set through both the recursive path and the whole-document path and compare accuracy *and* cost — the comparison the paper makes.
-2. **Parallel inspection** of siblings at a level — pure latency win, no accuracy change, no new dependency.
-3. **A response cache** keyed on `(chunk_id, sub_question)`. SQLite, one table. Makes prompt iteration far cheaper.
-4. **A search primitive** for the router — closer to the paper's REPL, letting it grep the document rather than relying only on the heading index. The biggest single step toward the paper's generality.
-5. **Multi-document routing**: one more level of index, over files instead of sections. The engine is already recursive; this is mostly a loader change.
-6. **Confidence-driven re-reading** — let a low-confidence finding trigger a targeted second look rather than the current binary `needs_more`.
-7. **Streaming the trace to a UI**, since `RLMResult.trace` is already structured for it.
+1. **Parallel inspection** of siblings at a level — pure latency win, no accuracy change, no new dependency.
+2. **A response cache** keyed on `(chunk_id, sub_question)`. SQLite, one table. Makes prompt iteration far cheaper.
+3. **A search primitive** for the router — closer to the paper's REPL, letting it grep the document rather than relying only on the heading index. The biggest single step toward the paper's generality.
+4. **Multi-document routing**: one more level of index, over files instead of sections. The engine is already recursive; this is mostly a loader change.
+5. **Confidence-driven re-reading** — let a low-confidence finding trigger a targeted second look rather than the current binary `needs_more`.
+6. **Streaming the trace to a UI**, since `RLMResult.trace` is already structured for it.
 
 ---
 
