@@ -50,7 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="model name (default: gpt-4o-mini, or RLM_MODEL)")
 
     limits = parser.add_argument_group("recursion budget")
-    limits.add_argument("--max-context-tokens", type=int, help="simulated context window (default: 1500)")
+    limits.add_argument(
+        "--max-context-tokens",
+        type=int,
+        help="working context budget: document tokens per call, not the model's window (default: 1500)",
+    )
     limits.add_argument("--chunk-target-tokens", type=int, help="target leaf chunk size (default: 600)")
     limits.add_argument("--max-depth", type=int, help="deepest recursion level (default: 3)")
     limits.add_argument("--max-iterations", type=int, help="routing rounds per level (default: 2)")
@@ -237,7 +241,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.as_json:
             print(_BANNER)
             print(f"\nDocument: {_short(document.path)}  ({document.total_tokens:,} tokens)")
-            print(f"Context window: {settings.max_context_tokens:,} tokens" + ("  [mock]" if args.mock else ""))
+            print(
+                f"Working budget: {settings.max_context_tokens:,} document tokens per call"
+                + ("  [mock]" if args.mock else "")
+            )
         return repl(engine, document, args.as_json)
 
     try:

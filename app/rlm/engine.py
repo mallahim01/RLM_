@@ -10,6 +10,13 @@ read in one sitting:
 4. If the readers came back short, route again over what is left (bounded).
 5. Combine the findings -- and only the findings -- into an answer.
 
+The reason this is worth doing is not only that a document might exceed a context
+window. It is that every step above happens in a *small* context, which is the
+regime where models reason most reliably -- recall degrades as context grows long
+before a window is full. Decomposition is how a large problem is turned into many
+small, accurate ones. See Zhang, Kraska & Khattab, "Recursive Language Models"
+(arXiv:2512.24601).
+
 Three independent guards stop a run: ``max_depth`` (how far down),
 ``max_iterations`` (how wide per level) and ``max_llm_calls`` (total spend). The
 call budget is enforced in exactly one place, ``_BudgetedClient.generate``, so it
@@ -142,8 +149,8 @@ class RLMEngine:
                 self.tracer.event(
                     "limit",
                     0,
-                    f"context limit {s.max_context_tokens} tok < document {doc_tokens} tok "
-                    "-> recursive mode",
+                    f"working context budget {s.max_context_tokens} tok < document "
+                    f"{doc_tokens} tok -> recursive mode",
                 )
                 findings = self._solve(run, tree, question, depth=0)
                 result = self._synthesize(run, findings)
@@ -185,12 +192,12 @@ class RLMEngine:
     # ------------------------------------------------------------------
 
     def _direct_answer(self, run: _Run, tree: list[Chunk], doc_tokens: int) -> RLMResult:
-        """The document fits. Answer in one call and say so plainly."""
+        """The document is within the working budget, so there is nothing to decompose."""
         self.tracer.event(
             "basecase",
             0,
-            f"document fits the {self.settings.max_context_tokens} tok context "
-            "-> answering directly, no recursion needed",
+            f"document fits the {self.settings.max_context_tokens} tok working budget "
+            "-> answering directly, no decomposition",
             document_tokens=doc_tokens,
         )
         text = "\n\n".join(f"## {c.path_str}\n{c.full_text()}" for c in tree)

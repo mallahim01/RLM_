@@ -38,7 +38,7 @@ def main() -> int:
 
     document = load_document(DOC)
     print(f"Document : {DOC.name}  ({document.total_tokens:,} tokens)")
-    print(f"Window   : {settings.max_context_tokens:,} tokens (simulated)")
+    print(f"Budget   : {settings.max_context_tokens:,} document tokens per call")
     print(f"Question : {QUESTION}\n")
 
     tree = build_chunk_tree(document.sections, settings.chunk_target_tokens, settings.chunk_overlap)

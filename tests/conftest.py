@@ -50,7 +50,7 @@ def _paragraph(word: str, count: int) -> str:
 
 @pytest.fixture
 def tiny_doc() -> Document:
-    """Small enough to fit any sane context window -> exercises the base case."""
+    """Small enough to fit any sane working budget -> exercises the base case."""
     sections = [
         Section(("Alpha",), _paragraph("alpha", 20), 1),
         Section(("Beta",), _paragraph("beta", 20), 1),

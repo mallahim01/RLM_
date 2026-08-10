@@ -10,77 +10,84 @@ The cost of that is proportional to **what the model chose to read**, not to how
 $ python -m app --question "What does SAP charge for indirect access?"
 
 [RLM] chunk: 26 chunks, 7769 tokens, tree depth 3, leaf target 600
-[RLM] context limit 1500 tok < document 7769 tok -> recursive mode
+[RLM] working context budget 1500 tok < document 7769 tok -> recursive mode
 ...
 [RLM] read 1,639 of 7,769 document tokens (21.1%)
 ```
 
-> **This is an educational implementation**, built to make the idea legible in a few hundred lines of Python. It is not a reproduction of any particular RLM paper, and it does not attempt the full space of recursive-inference techniques. It is meant to be read, run, and extended.
+> **This is an educational implementation.** It follows the RLM *idea* — recursive decomposition of a prompt the model treats as an environment rather than as tokens in its window — in a few hundred readable lines of Python. It is not a reimplementation of the paper's system, and it does not reproduce the paper's benchmarks. See [Relationship to the paper](#relationship-to-the-paper).
 
 ---
 
 ## Contents
 
-- [Why this problem is interesting](#why-this-problem-is-interesting)
-- [An honest note about the demo](#an-honest-note-about-the-demo)
+- [Background: the RLM paper](#background-the-rlm-paper)
+- [Why this matters even when the document fits](#why-this-matters-even-when-the-document-fits)
 - [Architecture](#architecture)
 - [How the recursion works](#how-the-recursion-works)
+- [The working context budget](#the-working-context-budget)
 - [Example run](#example-run)
 - [Install](#install)
 - [Configuration](#configuration)
 - [Running it](#running-it)
 - [Tests](#tests)
+- [Relationship to the paper](#relationship-to-the-paper)
 - [Design decisions](#design-decisions)
 - [Limitations](#limitations)
 - [Where to take it next](#where-to-take-it-next)
 
 ---
 
-## Why this problem is interesting
+## Background: the RLM paper
 
-The obvious way to answer a question about a long document is to put the whole document in the prompt. That has three problems that get worse with length:
+The concept comes from **"Recursive Language Models"** by Alex L. Zhang, Tim Kraska and Omar Khattab (MIT CSAIL), [arXiv:2512.24601](https://arxiv.org/abs/2512.24601) — see also the [author's write-up](https://alexzhang13.github.io/blog/2025/rlm/) and [reference implementation](https://github.com/alexzhang13/rlm).
 
-1. **It costs.** You pay for every token on every question, whether or not it was relevant.
-2. **Attention dilutes.** Accuracy on facts buried in the middle of a very long context is measurably worse than on the same facts in a short one.
-3. **It has a ceiling.** Eventually the corpus is bigger than any window, and "just use a bigger model" stops being an answer.
+Their framing, which is the part worth internalising:
 
-Classical RAG addresses this by embedding chunks and retrieving the top-k. That works well, but retrieval is a *single flat step*: you get one shot at picking the right chunks, from a similarity score, with no ability to look at something and then decide where to look next.
+> RLMs treat long prompts as part of an **external environment** and allow the LLM to programmatically examine, decompose, and recursively call itself over snippets of the prompt.
 
-An RLM makes the lookup itself a reasoning step, and lets it repeat:
+That is an epistemological shift, not a capacity trick. Context stops being *tokens inside the attention window* and becomes *data the model can operate on* — peek at it, partition it, search it, and spawn sub-calls over pieces of it.
 
-| | Stuff the whole context | Flat RAG | RLM (this repo) |
+Two results from that paper matter for how you should read this repo:
+
+- RLMs handle inputs **up to two orders of magnitude beyond the model's context window**.
+- More importantly for everyday use, they substantially outperform the base model **on inputs that fit inside the window**, at comparable cost per query.
+
+---
+
+## Why this matters even when the document fits
+
+The naive reading of RLM is "a workaround for documents that are too big." That is the least interesting thing about it.
+
+The real motivation is **context rot**: as the number of tokens in the context window grows, a model's ability to accurately use information from that context *degrades* — and this degradation begins **long before the window is full**. A model with a one-million-token window does not reason equally well over one million tokens as it does over ten thousand. The window is a capacity limit; it is not a quality guarantee.
+
+The paper's numbers make this concrete. On the OOLONG benchmark at a **132k-token split** — comfortably inside GPT-5's context window, so nothing is being "worked around" — `RLM(GPT-5-mini)` outperformed GPT-5 by **over 34 points (~114% relative)**, at roughly the same total API cost per query. A smaller model, given the ability to decompose the input, beat a larger model that was handed the whole thing at once.
+
+The mechanism is straightforward once stated: **every sub-call operates on a small, focused context, which is the regime where models are most reliable.** Recursion is how a large problem gets expressed as many small ones.
+
+So there are four independent reasons to reach for this, only one of which is about capacity:
+
+| Reason | Applies when the document fits? |
+|---|---|
+| **Accuracy** — small focused contexts avoid context rot | **Yes** — this is the main one |
+| **Cost** — you pay for what was read, not for the whole document, on every question | **Yes** |
+| **Auditability** — the trace shows which sections were consulted and why | **Yes** |
+| **Capacity** — inputs beyond any window | Only past the limit |
+
+Put differently: a bigger context window raises the ceiling on what you *can* pass in. It does not remove the reason to pass in less.
+
+### How this compares to the alternatives
+
+| | Whole context in the prompt | Flat RAG | RLM (this repo) |
 |---|---|---|---|
 | What the model sees first | everything | top-k chunks | a table of contents |
 | Selection made by | — | vector similarity | the model, with a stated reason |
 | Can it look again? | — | no | yes, bounded |
 | Can it zoom in? | — | no | yes — that's the recursion |
+| Context per reasoning step | the whole document | k chunks | one small section |
 | Cost scales with | document size | k | what it chose to read |
 
-The trade is real and worth stating plainly: an RLM spends **more model calls** to read **fewer tokens**, and it can explain which sections it consulted and why.
-
----
-
-## An honest note about the demo
-
-The sample document, [`test_files/erp-ai-capabilities.md`](test_files/erp-ai-capabilities.md), is about **7,800 tokens**. That fits comfortably in any current model's context window. Pretending otherwise would make this demo a lie.
-
-So the context limit here is an **explicit, configurable knob**, and it defaults to a deliberately small `max_context_tokens = 1500` — small enough that recursion genuinely triggers on a document you can read yourself in ten minutes.
-
-That is a *simulation of the long-context regime*, and it is the honest way to demonstrate the mechanism at a size you can inspect. The same code with `max_context_tokens=100_000` against a multi-million-token corpus does exactly what it does here.
-
-And the knob works in both directions — raise it above the document size and the engine takes the base case:
-
-```console
-$ python -m app --mock --max-context-tokens 20000 --question "Summarise the key findings."
-
-[RLM] load: erp-ai-capabilities.md (14 sections, 7519 tokens)
-[RLM] chunk: 26 chunks, 7769 tokens, tree depth 3, leaf target 600
-[RLM] document fits the 20000 tok context -> answering directly, no recursion needed
-[RLM] done in 0.0s | 1 LLM calls | 8,588 in / 122 out | max depth 0
-[RLM] read 7,769 of 7,769 document tokens (100.0%)
-```
-
-One call, 100% of the document read. **That is the system being correct, not broken.** Recursion is a response to a constraint; with no constraint, the right amount of recursion is none.
+The trade is real and worth stating plainly: an RLM spends **more model calls** to put **less in front of the model at each step**.
 
 ---
 
@@ -110,7 +117,7 @@ flowchart TD
     style I fill:#3d7a4a,color:#fff
 ```
 
-**Only `INSPECT` ever receives document text.** Routing, compression and synthesis all operate on the index or on findings. That is what keeps the reasoning context bounded no matter how large the input is.
+**Only `INSPECT` ever receives document text.** Routing, compression and synthesis all operate on the index or on findings. That is what keeps every reasoning step in the small-context regime, no matter how large the input is.
 
 ```
 app/
@@ -177,7 +184,7 @@ Note `c5`: it has three subsections in the source, but the whole thing fits in 6
 [c5] Cross-Platform Comparison | 458 tok | leaf | "Feasibility ranking for third-party agent tool-calling (best → hardest) 1. **Oracle Fusion** — clean `/invokeAsync` REST + MCP tool + A2A, m..."
 ```
 
-**That whole index is 396 tokens — 5.1% of the document.** And it is capped: previews shrink from 140 characters down to zero, and entries are dropped last, so the router prompt stays under `max_index_tokens` for a 10 KB document and a 10 MB one alike. Index cost is O(entries shown), not O(document).
+**That whole index is 396 tokens — 5.1% of the document.** And it is capped: previews shrink from 140 characters down to zero, and entries are dropped last, so the router prompt stays under `max_index_tokens` for a 10 KB document and a 10 GB one alike. Index cost is O(entries shown), not O(document).
 
 The router replies with JSON — ids and a sub-question for each:
 
@@ -221,6 +228,32 @@ The call budget is enforced in **exactly one place** — every model call in the
 
 ---
 
+## The working context budget
+
+`max_context_tokens` is the single most important setting, and it is easy to misread, so: **it is not your model's context window.** It is the *working set* — how much document text you are willing to put in front of the model in any one call.
+
+You set it by the quality and cost you want, not by what the model would technically accept. A model advertising a million-token window will still reason more reliably over 2,000 focused tokens than over 200,000 diffuse ones, and this setting is how you choose which regime the model works in.
+
+The default here is **1,500**. Raising it means fewer, larger calls; lowering it means more, smaller, sharper ones. The right value depends on your document and your accuracy requirements, and finding it is the main thing to experiment with.
+
+Below that budget there is nothing to decompose, so the engine takes a base case and answers directly:
+
+```console
+$ python -m app --mock --max-context-tokens 20000 --question "Summarise the key findings."
+
+[RLM] load: erp-ai-capabilities.md (14 sections, 7519 tokens)
+[RLM] chunk: 26 chunks, 7769 tokens, tree depth 3, leaf target 600
+[RLM] document fits the 20000 tok working budget -> answering directly, no decomposition
+[RLM] done in 0.0s | 1 LLM calls | 8,588 in / 122 out | max depth 0
+[RLM] read 7,769 of 7,769 document tokens (100.0%)
+```
+
+One call, 100% of the document read. That is the threshold behaving as configured — you told it 20,000 tokens in one prompt was acceptable, so it obliged. Whether that produces a *better answer* than the recursive path is exactly the question the paper investigates, and its finding was that below-the-limit does not mean better.
+
+The sample document is deliberately small enough to read yourself, so you can check the engine's work by hand. The mechanism is identical at any scale: the index is bounded, the leaf calls are bounded, and only the number of them grows.
+
+---
+
 ## Example run
 
 Reproducible with no API key. `--mock` swaps in an offline client: the *reasoning* is fake, but the chunking, indexing, routing, descent, budgets and token accounting are all real.
@@ -230,7 +263,7 @@ $ python -m app --mock --question "What does SAP charge for indirect access, and
 
 [RLM] load: erp-ai-capabilities.md (14 sections, 7519 tokens)
 [RLM] chunk: 26 chunks, 7769 tokens, tree depth 3, leaf target 600
-[RLM] context limit 1500 tok < document 7769 tok -> recursive mode
+[RLM] working context budget 1500 tok < document 7769 tok -> recursive mode
 [RLM] depth 0 | iteration 1
 [RLM]   prefilter: skipped (7 candidates <= 12)
 [RLM]   index: 7 chunks -> 396 tokens (5.1% of document)
@@ -259,7 +292,10 @@ $ python -m app --mock --question "What does SAP charge for indirect access, and
 [RLM] read 1,639 of 7,769 document tokens (21.1%)
 ```
 
-The indentation is the recursion. The last line is the point: **the question was answered after reading 21% of the document.**
+The indentation is the recursion. Two things to notice:
+
+- **No single call saw more than 515 tokens of document text.** Every reasoning step happened in the small-context regime.
+- **The question was answered after reading 21% of the document** — and the other 79% costs nothing on the next question either.
 
 Drop `--mock` and set a key for real reasoning. The trace shape is identical; only the routing choices and the answer change.
 
@@ -297,7 +333,7 @@ Every setting has a default, an `RLM_*` environment variable and a CLI flag. Pre
 | Setting | Default | What it does |
 |---|---|---|
 | `RLM_MODEL` | `gpt-4o-mini` | any chat model supporting JSON response format |
-| `RLM_MAX_CONTEXT_TOKENS` | `1500` | the simulated window — the headline knob |
+| `RLM_MAX_CONTEXT_TOKENS` | `1500` | **working context budget** — how much text goes into one call. Not your model's window; see [above](#the-working-context-budget) |
 | `RLM_CHUNK_TARGET_TOKENS` | `600` | target leaf size; drives how deep the tree gets |
 | `RLM_CHUNK_OVERLAP` | `60` | carried between hard-split parts only |
 | `RLM_MAX_DEPTH` | `3` | recursion guard |
@@ -313,7 +349,7 @@ Contradictory settings fail at startup rather than mid-run:
 ```console
 $ python -m app --max-context-tokens 500 --chunk-target-tokens 5000
 configuration error: chunk_target_tokens=5000 exceeds the inspect budget of 200 implied by
-max_context_tokens=500. Lower the chunk size or raise the context window.
+max_context_tokens=500. Lower the chunk size or raise the working budget.
 ```
 
 ---
@@ -380,6 +416,24 @@ The engine tests drive the recursion with scripted clients, so they assert on *c
 
 ---
 
+## Relationship to the paper
+
+This repo implements the RLM *idea*, not the paper's system. The differences are worth being explicit about:
+
+| | Paper ([arXiv:2512.24601](https://arxiv.org/abs/2512.24601)) | This repo |
+|---|---|---|
+| Environment | a **Python REPL** with the context pre-loaded as a variable; the root LM writes code to peek, partition and grep it | a **structured index** over a heading tree; the root LM picks section ids via JSON |
+| Flexibility | very high — the root model can do arbitrary computation over the context | bounded — it can route, descend and re-route, nothing else |
+| Failure modes | code errors, unbounded loops | hallucinated ids (dropped in code), bad routing |
+| Readability | a research system | ~700 lines meant to be read start to finish |
+| Evaluation | OOLONG, BrowseComp-Plus and others, with cost/quality curves | none — no benchmark claims are made here |
+
+The REPL approach in the paper is strictly more general, and if you want the real thing, use [their implementation](https://github.com/alexzhang13/rlm). The trade made here is deliberate: a fixed decomposition strategy is far easier to follow, test and reason about, which is the point of a teaching repo.
+
+**No claim is made that this implementation reproduces the paper's quality or cost results.** It demonstrates the mechanism. Measuring it would need a benchmark, which is [listed below](#where-to-take-it-next) as the most valuable thing to add.
+
+---
+
 ## Design decisions
 
 A few choices worth explaining, since the alternative was often the more obvious one:
@@ -400,13 +454,13 @@ A few choices worth explaining, since the alternative was often the more obvious
 
 Stated plainly, because a demo that oversells is worse than one that undersells:
 
-- **Structure-dependent.** The index is only as good as the headings. Markdown is ideal; a `.docx` with real heading styles is fine; a PDF is best-effort — it has no heading markup, so the loader guesses from short title-cased lines and falls back to page boundaries when that guess fires too often. A wall of unstructured text degrades this toward flat chunking.
-- **More calls than RAG.** Reading 21% of a document took 13 model calls. For small documents that is strictly worse than one big prompt. The crossover is a function of document size, and this demo is well below it — see [the honest note](#an-honest-note-about-the-demo).
+- **Structure-dependent.** The index is only as good as the headings. Markdown is ideal; a `.docx` with real heading styles is fine; a PDF is best-effort — it has no heading markup, so the loader guesses from short title-cased lines and falls back to page boundaries when that guess fires too often. A wall of unstructured text degrades this toward flat chunking. The paper's REPL approach is less exposed to this, since the root model can search rather than rely on a given structure.
+- **Latency, not just calls.** Reading 21% of a document took 13 model calls, run sequentially. Wall-clock is the real cost here; the token cost was already favourable. Parallel inspection is the obvious fix and is [first on the list below](#where-to-take-it-next).
+- **Unmeasured.** No benchmark is run in this repo, so the accuracy argument rests on the paper's results, not on evidence produced here. Do not cite this implementation as proof of anything.
 - **The router can be wrong.** It picks from headings and 140-character previews. If a fact sits under a misleading heading with an unrevealing opening, the router may not go there. Hallucinated ids are dropped safely, but a *plausible wrong* choice is just a wrong answer.
 - **No caching or persistence.** Every question re-chunks and re-routes from scratch. Two identical questions cost twice. There is no database, by design.
 - **Single document.** The engine navigates one document's tree. A corpus of thousands of files would want another level above this one.
 - **Findings are not cross-checked.** If two sections disagree, synthesis sees both and does its best. There is no contradiction detection.
-- **Sequential.** Sibling sections at the same level are inspected one after another; they are independent and could run concurrently.
 
 ---
 
@@ -414,12 +468,12 @@ Stated plainly, because a demo that oversells is worse than one that undersells:
 
 Roughly in order of value per unit of added complexity:
 
-1. **Parallel inspection** of siblings at a level — pure latency win, no accuracy change, no new dependency.
-2. **A response cache** keyed on `(chunk_id, sub_question)`. SQLite, one table. Makes iterating on prompts far cheaper.
-3. **Embeddings as a second pre-filter stage**, after BM25 rather than instead of it — worth doing once a corpus is large enough that lexical scoring visibly misses.
-4. **Multi-document routing**: one more level of index, over files instead of sections. The engine is already recursive; this is mostly a loader change.
-5. **Confidence-driven re-reading** — let a low-confidence finding trigger a targeted second look rather than the current binary `needs_more`.
-6. **Answer verification**: a final pass checking each claim against the evidence quotes actually returned.
+1. **A benchmark.** Everything else is guesswork without one. Run the same question set through the recursive path and the whole-document path, and compare accuracy *and* cost — which is exactly the comparison the paper makes.
+2. **Parallel inspection** of siblings at a level — pure latency win, no accuracy change, no new dependency.
+3. **A response cache** keyed on `(chunk_id, sub_question)`. SQLite, one table. Makes iterating on prompts far cheaper.
+4. **A search primitive** for the router — closer to the paper's REPL, letting it grep the document rather than relying only on the heading index. The biggest single step toward the paper's generality.
+5. **Multi-document routing**: one more level of index, over files instead of sections. The engine is already recursive; this is mostly a loader change.
+6. **Confidence-driven re-reading** — let a low-confidence finding trigger a targeted second look rather than the current binary `needs_more`.
 7. **Streaming the trace to a UI**, since `RLMResult.trace` is already structured for exactly that.
 
 ---

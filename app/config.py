@@ -27,7 +27,10 @@ class Settings:
     openai_api_key: str = ""
     model: str = "gpt-4o-mini"
 
-    # The headline knob: the simulated context window.
+    # The working context budget: how much document text goes into one call.
+    # Not the model's context window -- the amount we choose to show it at once,
+    # because reasoning quality degrades with context length long before the
+    # window is full. See README, "The working context budget".
     max_context_tokens: int = 1500
 
     # Chunking.
@@ -79,7 +82,7 @@ class Settings:
                 f"chunk_target_tokens={self.chunk_target_tokens} exceeds the inspect "
                 f"budget of {self.inspect_budget} implied by "
                 f"max_context_tokens={self.max_context_tokens}. Lower the chunk size "
-                "or raise the context window."
+                "or raise the working budget."
             )
         if self.max_depth < 1:
             raise ConfigError("max_depth must be at least 1.")
