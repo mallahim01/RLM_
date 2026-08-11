@@ -419,7 +419,7 @@ Below that budget there is nothing to decompose, so the engine skips straight to
 Python 3.11 or newer.
 
 ```bash
-git clone https://github.com/mallahim-ai/RLM_proj.git
+git clone https://github.com/mallahim01/RLM_
 cd RLM_proj
 
 python -m venv .venv
