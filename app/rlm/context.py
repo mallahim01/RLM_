@@ -18,17 +18,38 @@ from app.rlm.tokens import count_tokens
 _PREVIEW_LADDER = (140, 100, 60, 30, 0)
 
 
-def _entry(chunk: Chunk, preview_chars: int) -> str:
+def common_prefix_len(chunks: list[Chunk]) -> int:
+    """How many leading heading levels every candidate already shares.
+
+    Inside a branch, all candidates hang off the same ancestors. Repeating that
+    shared path on every line costs tokens and discriminates nothing -- the
+    router is choosing *between* these entries, so only what differs is signal.
+    """
+    if len(chunks) < 2:
+        return 0
+    shortest = min(len(c.heading_path) for c in chunks)
+    shared = 0
+    for level in range(shortest):
+        titles = {c.heading_path[level] for c in chunks}
+        if len(titles) != 1:
+            break
+        shared += 1
+    # Never strip a chunk's own last heading; it must stay identifiable.
+    return min(shared, shortest - 1)
+
+
+def _entry(chunk: Chunk, preview_chars: int, strip: int = 0) -> str:
+    path = " > ".join(chunk.heading_path[strip:]) or chunk.path_str
     shape = "leaf" if chunk.is_leaf else f"{len(chunk.children)} subsections"
-    line = f"[{chunk.id}] {chunk.path_str} | {chunk.token_count} tok | {shape}"
+    line = f"[{chunk.id}] {path} | {chunk.token_count} tok | {shape}"
     if preview_chars:
         line += f' | "{chunk.preview(preview_chars)}"'
     return line
 
 
-def render_index(chunks: list[Chunk], preview_chars: int = 140) -> str:
+def render_index(chunks: list[Chunk], preview_chars: int = 140, strip: int = 0) -> str:
     """Render one line per chunk at a fixed preview length."""
-    return "\n".join(_entry(c, preview_chars) for c in chunks)
+    return "\n".join(_entry(c, preview_chars, strip) for c in chunks)
 
 
 def build_index(chunks: list[Chunk], max_tokens: int = 800) -> str:
@@ -38,13 +59,14 @@ def build_index(chunks: list[Chunk], max_tokens: int = 800) -> str:
     """
     if not chunks:
         return "(no sections)"
+    strip = common_prefix_len(chunks)
     for preview_chars in _PREVIEW_LADDER:
-        rendered = render_index(chunks, preview_chars)
+        rendered = render_index(chunks, preview_chars, strip)
         if count_tokens(rendered) <= max_tokens:
             return rendered
     # Even bare id + heading lines are too long: keep the head and say so.
     # The notice itself costs tokens, so reserve room for it before packing.
-    lines = render_index(chunks, 0).splitlines()
+    lines = render_index(chunks, 0, strip).splitlines()
     notice = f"... and {len(lines)} more sections omitted to fit the index budget"
     budget = max(0, max_tokens - count_tokens(notice) - 1)
 

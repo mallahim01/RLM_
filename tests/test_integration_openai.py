@@ -12,25 +12,25 @@ import os
 
 import pytest
 
-from app.config import load_settings
+from app.config import PROVIDERS, load_settings
 from app.rlm.engine import RLMEngine
 from app.trace import Tracer
 
+_ANY_KEY = any(os.getenv(p.env_key, "").strip() for p in PROVIDERS.values())
+_KEY_NAMES = " or ".join(sorted(p.env_key for p in PROVIDERS.values()))
+
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(
-        not os.getenv("OPENAI_API_KEY"), reason="set OPENAI_API_KEY in .env to run"
-    ),
+    pytest.mark.skipif(not _ANY_KEY, reason=f"set {_KEY_NAMES} in .env to run"),
 ]
 
 
 @pytest.fixture
 def engine(erp_doc):
     settings = load_settings(tokenizer="auto")
-    from app.llm import build_openai_client
+    from app.llm import build_client
 
-    client = build_openai_client(settings.openai_api_key, settings.model, settings.request_timeout)
-    return RLMEngine(client, settings, Tracer(enabled=True))
+    return RLMEngine(build_client(settings), settings, Tracer(enabled=True))
 
 
 def test_real_model_answers_from_a_deeply_nested_section(engine, erp_doc):

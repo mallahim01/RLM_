@@ -56,7 +56,7 @@ def test_missing_key_without_mock_is_a_clear_error(capsys, monkeypatch):
 def _keyless_settings(**overrides):
     from app.config import load_settings
 
-    overrides["openai_api_key"] = ""
+    overrides["api_key"] = ""
     return load_settings(**overrides)
 
 

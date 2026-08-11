@@ -125,7 +125,23 @@ Three hard bounds hold regardless of input size, at default settings:
 
 On the bundled sample document (7,519 tokens → 26 chunks, depth 3, 7 top-level entries), the routing context is **396 tokens — 5.3% of the document**.
 
-> **What is deliberately absent:** any accuracy figure produced by this repository. Measuring answer quality needs a benchmark, which this repo does not yet have. The accuracy case rests on the paper's results, cited above. See [Limitations](#limitations).
+### One verified live run
+
+All three sample files merged into a single corpus (`--all-docs`), asked a two-part question whose halves live in **different source documents**: Oracle's free AI-Unit allowance (in the ERP markdown, three levels deep) and WhatsApp's message datastore (in the PDF).
+
+| | |
+|---|---|
+| Corpus | 19,717 tokens, 70 chunks, tree depth 4 |
+| Model calls | 14 |
+| Tokens sent / received | 8,551 / 2,016 |
+| Deepest recursion | level 3 |
+| **Document tokens read** | **1,914 of 19,717 — 9.7%** |
+| Chunks inspected | 4 of 70 |
+| Wall clock | 14.8 s |
+
+Both facts were returned correctly with citations to the right source file, and both were checked back against the originals by hand. Of note: the router split the compound question into two sub-questions at the top level and sent each down a different document's branch, and at depth 3 its first pick returned `found: false`, so the level routed a second time and found the answer — the iterative-expansion path doing its job rather than the run failing.
+
+This is **one run, not a benchmark**: it shows the mechanism working against a real model on a real multi-format corpus. The comparison against passing the whole corpus in one prompt is the paper's, cited above.
 
 ---
 
@@ -416,9 +432,15 @@ Five dependencies: `openai`, `python-dotenv`, `tiktoken`, `pypdf`, and `pytest`.
 
 Every setting has a default, an `RLM_*` environment variable and a CLI flag. Precedence is **CLI flag > environment > default**. See [`.env.example`](.env.example) for the full list.
 
+Set one API key. `OPENAI_API_KEY` and `GEMINI_API_KEY` are both recognised; whichever is present selects the provider, and OpenAI wins if both are set.
+
+Gemini is reached through its **OpenAI-compatible endpoint**, so supporting it costs a `base_url` rather than a second SDK — adding a third provider is one entry in `PROVIDERS` in [`app/config.py`](app/config.py).
+
 | Setting | Default | What it does |
 |---|---:|---|
-| `RLM_MODEL` | `gpt-4o-mini` | any chat model supporting JSON response format |
+| `RLM_PROVIDER` | auto | `openai` or `gemini`; auto-detected from whichever key is set |
+| `RLM_MODEL` | per provider | `gpt-4o-mini` / `gemini-flash-lite-latest`. A rolling alias is used for Gemini because numbered ids get retired and start returning 404 |
+| `RLM_BASE_URL` | per provider | override the endpoint; for proxies or a local OpenAI-compatible server |
 | `RLM_MAX_CONTEXT_TOKENS` | `1500` | **working context budget** — text per call. Not the model's window; see [above](#the-working-context-budget) |
 | `RLM_CHUNK_TARGET_TOKENS` | `600` | target leaf size; drives how deep the tree gets |
 | `RLM_CHUNK_OVERLAP` | `60` | carried between hard-split parts only |
@@ -427,8 +449,11 @@ Every setting has a default, an `RLM_*` environment variable and a CLI flag. Pre
 | `RLM_MAX_LLM_CALLS` | `25` | total call budget per question |
 | `RLM_PREFILTER_THRESHOLD` | `12` | above this many candidates, lexical scoring narrows first |
 | `RLM_TOKENIZER` | `auto` | `heuristic` forces chars/4 and never touches the network |
+| `RLM_RATE_LIMIT_RETRIES` | `3` | how many times to wait out a rate limit; see below |
 
-`OPENAI_API_KEY` is unprefixed, by SDK convention. It is **never logged**: `Settings.__repr__` masks it, so neither a stray `print` nor an exception dump can leak it, and `.env` is gitignored. Contradictory settings fail at startup rather than mid-run.
+Vendor key names are unprefixed, by convention. A key is **never logged**: `Settings.__repr__` masks it, so neither a stray `print` nor an exception dump can leak it, and `.env` is gitignored. Contradictory settings fail at startup rather than mid-run.
+
+**On free tiers:** an RLM makes a dozen small calls in a few seconds, which is exactly the shape a requests-per-minute quota punishes — Gemini's free tier allows 15/minute, and a single question can exceed that. The client therefore waits out `429`s for as long as the server asks (reading `Retry-After`, or the delay named in the error), capped and bounded by `RLM_RATE_LIMIT_RETRIES`. The SDK's own backoff tops out in single-digit seconds, which is not enough. A rate-limited run gets slower; it does not fail.
 
 ---
 
@@ -440,8 +465,17 @@ python -m app --question "..."              # one question against the real mode
 python -m app                               # interactive (:help, :tree, :stats, :trace)
 python -m app --show-tree                   # print the chunk tree and exit
 python -m app --json --question "..."       # stdout is pure JSON; trace goes to stderr
-python -m app --doc path/to/file.pdf --question "..."
+
+python -m app --all-docs --question "..."   # every sample file as one corpus
+python -m app --doc a.md --doc b.pdf -Q "..."   # merge specific files
+python -m app --provider gemini -Q "..."    # choose a vendor explicitly
 ```
+
+### Several documents at once
+
+`--doc` repeats, and `--all-docs` merges everything in `test_files/`. Each file becomes a **top-level branch** of one tree, so picking *which document* to look in is the same routing decision as picking a section — one level higher. Formats mix freely; the markdown, PDF and DOCX loaders all produce the same `Section` shape.
+
+Merging the three bundled files gives a 19,717-token corpus across 70 chunks at depth 4, whose whole top-level index is **171 tokens — 0.9% of the corpus**.
 
 Three scripts in [`examples/`](examples/):
 
@@ -458,8 +492,8 @@ Under `--mock`, the *reasoning* is a deterministic stand-in, but the chunking, i
 ## Tests
 
 ```bash
-pytest                  # 116 tests, fully offline, no API calls, no network
-pytest -m integration   # the paid tests; needs OPENAI_API_KEY
+pytest                  # 152 tests, fully offline, no API calls, no network
+pytest -m integration   # the paid tests; needs an API key
 ```
 
 The default run is free by construction: the `integration` marker is excluded in `pyproject.toml`, and `conftest.py` pins the heuristic tokenizer so counts are deterministic and nothing fetches a BPE table.
@@ -474,7 +508,10 @@ The default run is free by construction: the `integration` marker is excluded in
 | Engine | base case is exactly one call; descent reaches depth 2; only findings travel upward |
 | Guards | depth, iteration and call budgets each enforced independently |
 | Resilience | malformed replies, **hallucinated chunk ids**, wrong JSON types, failed synthesis |
-| OpenAI client | request construction and usage parsing, against a stubbed SDK |
+| Providers | key auto-detection; the model follows the provider; Gemini gets the compat endpoint and OpenAI does not get a hardcoded host |
+| Rate limits | the server's stated delay is honoured, capped, bounded — and auth failures are *not* retried |
+| Merging | each file becomes one branch; no tokens lost; a single-section file keeps its heading |
+| Client | request construction and usage parsing, against a stubbed SDK |
 | CLI | `--mock`, `--json` purity, exit codes, config errors, and `examples/` actually executing |
 
 Engine tests drive the recursion with scripted clients, so they assert on *control flow* — how many calls, at what depth, in what order — rather than on model output.
@@ -507,7 +544,9 @@ The REPL approach is strictly more general; for the real thing use [their implem
 
 **No `python-docx`.** A `.docx` is a zip of XML with explicit heading styles; `zipfile` plus `ElementTree` handles it in about thirty-five lines and zero dependencies. `python-docx` would have pulled in `lxml`, a multi-megabyte C extension.
 
-**No `tenacity`.** The OpenAI SDK already retries connection errors, 429s and 5xx with backoff. The only retry added here is *semantic* — asking a model to repair malformed JSON — which a retry library cannot express anyway.
+**No `tenacity`.** The SDK already retries connection errors and 5xx with backoff. Only two retries are added on top, and neither is something a retry library expresses well: a *semantic* one (asking a model to repair malformed JSON), and a *rate-limit* one that waits for the duration the server names rather than a generic curve.
+
+**A second provider, not a second SDK.** Gemini publishes an OpenAI-compatible endpoint, so it is reached by pointing the same client at a different `base_url`. That keeps the dependency list unchanged and the client code single-path. Adding a provider means adding one entry to `PROVIDERS`.
 
 **Malformed model output is expected, not exceptional.** Four layers handle it: JSON response mode, an extraction ladder (raw → strip fences → balanced-brace scan), required-key validation, and one repair retry. After that it is **non-fatal**: a failed route ends that level and synthesis proceeds with whatever was found.
 
@@ -531,9 +570,8 @@ Roughly in order of value per unit of added complexity:
 1. **Parallel inspection** of siblings at a level — pure latency win, no accuracy change, no new dependency.
 2. **A response cache** keyed on `(chunk_id, sub_question)`. SQLite, one table. Makes prompt iteration far cheaper.
 3. **A search primitive** for the router — closer to the paper's REPL, letting it grep the document rather than relying only on the heading index. The biggest single step toward the paper's generality.
-4. **Multi-document routing**: one more level of index, over files instead of sections. The engine is already recursive; this is mostly a loader change.
-5. **Confidence-driven re-reading** — let a low-confidence finding trigger a targeted second look rather than the current binary `needs_more`.
-6. **Streaming the trace to a UI**, since `RLMResult.trace` is already structured for it.
+4. **Confidence-driven re-reading** — let a low-confidence finding trigger a targeted second look rather than the current binary `needs_more`.
+5. **Streaming the trace to a UI**, since `RLMResult.trace` is already structured for it.
 
 ---
 

@@ -22,12 +22,24 @@ __all__ = [
     "DemoLLMClient",
     "PatternLLMClient",
     "ScriptedLLMClient",
-    "build_openai_client",
+    "build_client",
 ]
 
 
-def build_openai_client(api_key: str, model: str, timeout: float = 60.0):
-    """Construct the real client. Imported here to keep the SDK off the hot path."""
+def build_client(settings):
+    """Construct the real client for the configured provider.
+
+    Imported lazily so the SDK stays off the hot path and out of the tests.
+    """
     from app.llm.openai_client import OpenAIClient
 
-    return OpenAIClient(api_key=api_key, model=model, timeout=timeout)
+    spec = settings.provider_spec
+    return OpenAIClient(
+        api_key=settings.api_key,
+        model=settings.model,
+        timeout=settings.request_timeout,
+        base_url=settings.base_url,
+        provider=settings.provider,
+        env_key=spec.env_key,
+        rate_limit_retries=settings.rate_limit_retries,
+    )

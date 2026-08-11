@@ -126,7 +126,7 @@ def test_vendor_exceptions_are_re_raised_as_llm_error(client):
     with pytest.raises(LLMError) as excinfo:
         client.generate("p")
 
-    assert "OpenAI request failed" in str(excinfo.value)
+    assert "openai request failed" in str(excinfo.value), "the provider is named"
     assert "insufficient_quota" in str(excinfo.value)
 
 
@@ -139,6 +139,108 @@ def test_a_missing_key_is_refused_before_the_sdk_is_touched(monkeypatch):
 
     assert "OPENAI_API_KEY" in str(excinfo.value)
     assert "--mock" in str(excinfo.value)
+
+
+class _RateLimited(Exception):
+    """Shaped like the SDK's RateLimitError: a status code and a retry hint."""
+
+    def __init__(self, message="429 quota exceeded. Please retry in 24.35s", status=429):
+        super().__init__(message)
+        self.status_code = status
+
+
+def _rate_limit_client(monkeypatch, failures: int, message=None, headers=None):
+    """A client whose first `failures` calls are rate-limited, then succeed."""
+    slept: list[float] = []
+    state = {"n": 0}
+
+    class Limited(_FakeOpenAI):
+        def _create(self, **kwargs):
+            state["n"] += 1
+            if state["n"] <= failures:
+                exc = _RateLimited(message) if message else _RateLimited()
+                if headers is not None:
+                    exc.response = types.SimpleNamespace(headers=headers)
+                raise exc
+            return _Completion(content='{"ok": true}')
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Limited))
+    from app.llm.openai_client import OpenAIClient
+
+    client = OpenAIClient(api_key="k", provider="gemini", sleep=slept.append)
+    return client, slept, state
+
+
+def test_a_rate_limit_is_waited_out_and_the_call_succeeds(monkeypatch):
+    client, slept, state = _rate_limit_client(monkeypatch, failures=2)
+
+    response = client.generate("p")
+
+    assert response.text == '{"ok": true}'
+    assert state["n"] == 3, "two refusals then a success"
+    assert len(slept) == 2
+
+
+def test_the_wait_honours_the_delay_the_server_asked_for(monkeypatch):
+    client, slept, _ = _rate_limit_client(
+        monkeypatch, failures=1, message="429: please retry in 24.351489338s"
+    )
+    client.generate("p")
+    assert slept == [24.351489338], "a generic backoff would be far too short"
+
+
+def test_a_retry_after_header_wins_over_the_message(monkeypatch):
+    client, slept, _ = _rate_limit_client(
+        monkeypatch, failures=1, message="429 retry in 99s", headers={"retry-after": "7"}
+    )
+    client.generate("p")
+    assert slept == [7.0]
+
+
+def test_the_wait_is_capped_so_a_run_cannot_hang(monkeypatch):
+    client, slept, _ = _rate_limit_client(
+        monkeypatch, failures=1, message="429 retryDelay: 100000s"
+    )
+    client.generate("p")
+    assert slept[0] <= 65.0
+
+
+def test_giving_up_after_the_configured_number_of_waits(monkeypatch):
+    client, slept, state = _rate_limit_client(monkeypatch, failures=99)
+
+    with pytest.raises(LLMError, match="gemini request failed"):
+        client.generate("p")
+
+    assert len(slept) == 3, "bounded, not an unlimited wait loop"
+    assert state["n"] == 4
+
+
+def test_non_rate_limit_errors_are_not_retried(monkeypatch):
+    class Broken(_FakeOpenAI):
+        def _create(self, **kwargs):
+            raise RuntimeError("401 invalid key")
+
+    slept: list[float] = []
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Broken))
+    from app.llm.openai_client import OpenAIClient
+
+    with pytest.raises(LLMError):
+        OpenAIClient(api_key="k", sleep=slept.append).generate("p")
+
+    assert slept == [], "an auth failure must fail fast, not sit in a retry loop"
+
+
+def test_no_base_url_is_sent_unless_asked_for(client):
+    assert "base_url" not in _FakeOpenAI.last_init
+
+
+def test_a_base_url_reaches_the_sdk(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_FakeOpenAI))
+    from app.llm.openai_client import OpenAIClient
+
+    OpenAIClient(api_key="k", base_url="https://example.test/v1/", provider="gemini")
+
+    assert _FakeOpenAI.last_init["base_url"] == "https://example.test/v1/"
 
 
 def test_a_missing_sdk_gives_an_actionable_message(monkeypatch):

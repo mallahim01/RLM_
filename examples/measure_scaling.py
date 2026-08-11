@@ -57,7 +57,7 @@ def measure(markdown: str, settings) -> dict:
 
 
 def main() -> int:
-    settings = load_settings(openai_api_key="not-needed")
+    settings = load_settings(api_key="not-needed")
 
     print("How the routing context scales with document size")
     print("(model-independent: no API calls, deterministic)\n")

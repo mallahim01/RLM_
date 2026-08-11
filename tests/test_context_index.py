@@ -57,6 +57,54 @@ def test_empty_index_is_still_a_valid_string():
     assert build_index([]) == "(no sections)"
 
 
+def _sibling(chunk_id: str, *path: str) -> Chunk:
+    return Chunk(id=chunk_id, heading_path=path, text="body " * 50, token_count=100, depth=1)
+
+
+def test_the_shared_ancestor_path_is_not_repeated_on_every_line():
+    """Inside a branch the common prefix is pure token cost and no signal."""
+    siblings = [
+        _sibling("c1.1", "A Very Long Document Title", "Details", "SAP"),
+        _sibling("c1.2", "A Very Long Document Title", "Details", "Odoo"),
+        _sibling("c1.3", "A Very Long Document Title", "Details", "Oracle"),
+    ]
+    index = build_index(siblings)
+
+    assert "A Very Long Document Title" not in index
+    for name in ("SAP", "Odoo", "Oracle"):
+        assert name in index
+    for cid in ("c1.1", "c1.2", "c1.3"):
+        assert f"[{cid}]" in index, "ids must stay intact -- they are what gets selected"
+
+
+def test_stripping_never_removes_a_chunks_own_heading():
+    identical = [_sibling("c1", "Same", "Path"), _sibling("c2", "Same", "Path")]
+    index = build_index(identical)
+    assert "Path" in index
+
+
+def test_nothing_is_stripped_when_paths_diverge_at_the_top():
+    mixed = [_sibling("c1", "Alpha", "One"), _sibling("c2", "Beta", "Two")]
+    index = build_index(mixed)
+    assert "Alpha" in index and "Beta" in index
+
+
+def test_a_single_candidate_keeps_its_full_path():
+    index = build_index([_sibling("c1", "Alpha", "One")])
+    assert "Alpha" in index and "One" in index
+
+
+def test_stripping_measurably_shrinks_a_deep_index(erp_doc):
+    tree = build_chunk_tree(erp_doc.sections, 600, 60)
+    platforms = next(c for c in tree if c.path_str == "Details by Platform")
+    deep = platforms.children[0].children  # the "part n/m" leaves
+
+    stripped = build_index(deep)
+    full = render_index(deep, preview_chars=140)
+
+    assert count_tokens(stripped) < count_tokens(full)
+
+
 def test_findings_render_without_leaking_source_text():
     from app.models import Finding
 

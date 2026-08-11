@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.cli import render_result  # noqa: E402
 from app.config import load_settings  # noqa: E402
-from app.llm import build_openai_client  # noqa: E402
+from app.llm import build_client  # noqa: E402
 from app.loaders import load_document  # noqa: E402
 from app.rlm.engine import RLMEngine  # noqa: E402
 from app.trace import Tracer, configure_logging  # noqa: E402
@@ -42,17 +42,14 @@ def main(argv: list[str]) -> int:
 
     settings = load_settings()
     if not settings.has_api_key:
-        print("No OPENAI_API_KEY found. Copy .env.example to .env and set it,", file=sys.stderr)
+        env_key = settings.provider_spec.env_key
+        print(f"No {env_key} found. Copy .env.example to .env and set it,", file=sys.stderr)
         print("or run examples/run_mock_demo.py to see the flow without a key.", file=sys.stderr)
         return 2
 
     logger = configure_logging(settings.log_level, stream=sys.stdout)
     document = load_document(DOC)
-    engine = RLMEngine(
-        build_openai_client(settings.openai_api_key, settings.model, settings.request_timeout),
-        settings,
-        Tracer(logger),
-    )
+    engine = RLMEngine(build_client(settings), settings, Tracer(logger))
 
     if argv and not argv[0].isdigit():
         selected = [("custom", " ".join(argv))]

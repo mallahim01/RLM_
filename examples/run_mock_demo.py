@@ -33,7 +33,7 @@ def main() -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    settings = load_settings(openai_api_key="not-needed-for-mock")
+    settings = load_settings(api_key="not-needed-for-mock")
     logger = configure_logging(settings.log_level, stream=sys.stdout)
 
     document = load_document(DOC)

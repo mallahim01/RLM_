@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, NamedTuple
 
 # Rough cost of the fixed scaffolding around a leaf call: system prompt,
 # instructions, heading path, the sub-question, and room for the JSON reply.
@@ -22,10 +22,47 @@ class ConfigError(ValueError):
     """Raised when settings contradict each other. Fails at startup, not mid-run."""
 
 
+class Provider(NamedTuple):
+    """Everything that differs between one model vendor and another."""
+
+    name: str
+    env_key: str
+    default_model: str
+    base_url: str  # "" means the SDK's own default
+
+
+# Gemini publishes an OpenAI-compatible endpoint, so a base_url is the entire
+# difference. That keeps this project at one HTTP client and no extra
+# dependency -- adding a third provider should be one more line here.
+PROVIDERS: dict[str, Provider] = {
+    "openai": Provider(
+        name="openai",
+        env_key="OPENAI_API_KEY",
+        default_model="gpt-4o-mini",
+        base_url="",
+    ),
+    "gemini": Provider(
+        name="gemini",
+        env_key="GEMINI_API_KEY",
+        # A rolling alias rather than a pinned version: Google retires numbered
+        # Gemini models fairly quickly, and a pinned id turns into a 404 for
+        # anyone cloning this later. Lite is the cheapest tier, which suits a
+        # demo that makes a dozen small calls per question.
+        default_model="gemini-flash-lite-latest",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    ),
+}
+
+# Checked in order when no provider is named explicitly.
+_AUTODETECT_ORDER = ("openai", "gemini")
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class Settings:
-    openai_api_key: str = ""
-    model: str = "gpt-4o-mini"
+    provider: str = "openai"
+    api_key: str = ""
+    model: str = ""  # empty means "the provider's default"
+    base_url: str = ""
 
     # The working context budget: how much document text goes into one call.
     # Not the model's context window -- the amount we choose to show it at once,
@@ -50,6 +87,10 @@ class Settings:
 
     temperature: float = 0.0
     request_timeout: float = 60.0
+    # How many times to wait out a rate limit. Free tiers meter per minute, and
+    # an RLM makes many small calls quickly, so this is the difference between
+    # a run completing slowly and failing outright.
+    rate_limit_retries: int = 3
     log_level: str = "INFO"
     tokenizer: str = "auto"  # auto | heuristic
 
@@ -60,9 +101,16 @@ class Settings:
 
     @property
     def has_api_key(self) -> bool:
-        return bool(self.openai_api_key.strip())
+        return bool(self.api_key.strip())
+
+    @property
+    def provider_spec(self) -> Provider:
+        return PROVIDERS[self.provider]
 
     def validate(self) -> None:
+        if self.provider not in PROVIDERS:
+            known = ", ".join(sorted(PROVIDERS))
+            raise ConfigError(f"Unknown provider {self.provider!r}. Known providers: {known}.")
         if self.max_context_tokens < 400:
             raise ConfigError(
                 f"max_context_tokens={self.max_context_tokens} is too small to fit a "
@@ -96,19 +144,17 @@ class Settings:
             raise ConfigError("tokenizer must be 'auto' or 'heuristic'.")
 
     def masked_key(self) -> str:
-        key = self.openai_api_key.strip()
+        key = self.api_key.strip()
         if not key:
             return "(unset)"
         tail = key[-4:] if len(key) > 8 else "****"
-        return f"sk-...{tail} (set)"
+        return f"...{tail} (set, {len(key)} chars)"
 
     def __repr__(self) -> str:  # never leak the key
         shown = ", ".join(
-            f"{f.name}={getattr(self, f.name)!r}"
-            for f in fields(self)
-            if f.name != "openai_api_key"
+            f"{f.name}={getattr(self, f.name)!r}" for f in fields(self) if f.name != "api_key"
         )
-        return f"Settings(openai_api_key={self.masked_key()!r}, {shown})"
+        return f"Settings(api_key={self.masked_key()!r}, {shown})"
 
 
 _ENV_PREFIX = "RLM_"
@@ -135,6 +181,20 @@ def _coerce(name: str, raw: str, target_type: Any) -> Any:
         ) from exc
 
 
+def detect_provider() -> str:
+    """Pick a provider from whichever vendor key is present."""
+    named = _env("provider")
+    if named:
+        if named.lower() not in PROVIDERS:
+            known = ", ".join(sorted(PROVIDERS))
+            raise ConfigError(f"Unknown RLM_PROVIDER={named!r}. Known providers: {known}.")
+        return named.lower()
+    for name in _AUTODETECT_ORDER:
+        if os.getenv(PROVIDERS[name].env_key, "").strip():
+            return name
+    return "openai"
+
+
 def load_settings(**overrides: Any) -> Settings:
     """Build settings from `.env` + environment, then apply non-None overrides."""
     try:
@@ -146,7 +206,7 @@ def load_settings(**overrides: Any) -> Settings:
 
     values: dict[str, Any] = {}
     for f in fields(Settings):
-        if f.name == "openai_api_key":
+        if f.name in ("api_key", "provider"):
             continue
         raw = _env(f.name)
         if raw is not None:
@@ -154,8 +214,15 @@ def load_settings(**overrides: Any) -> Settings:
             # the target type from the default instead. Every field has one.
             values[f.name] = _coerce(f.name, raw, type(f.default))
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    values["openai_api_key"] = api_key
+    provider_name = overrides.pop("provider", None) or detect_provider()
+    if provider_name not in PROVIDERS:
+        known = ", ".join(sorted(PROVIDERS))
+        raise ConfigError(f"Unknown provider {provider_name!r}. Known providers: {known}.")
+    spec = PROVIDERS[provider_name]
+
+    values["provider"] = provider_name
+    values["api_key"] = os.getenv(spec.env_key, "").strip()
+    values.setdefault("base_url", spec.base_url)
 
     for key, value in overrides.items():
         if value is None:
@@ -163,6 +230,11 @@ def load_settings(**overrides: Any) -> Settings:
         if key not in {f.name for f in fields(Settings)}:
             raise ConfigError(f"Unknown setting override: {key!r}")
         values[key] = value
+
+    # A model was not chosen anywhere -> use the provider's own default, so
+    # switching provider does not silently keep the other vendor's model name.
+    if not values.get("model"):
+        values["model"] = spec.default_model
 
     settings = Settings(**values)
     settings.validate()

@@ -32,15 +32,29 @@ def deterministic_tokenizer(monkeypatch: pytest.MonkeyPatch):
     tokens_module.reset_tokenizer_cache()
 
 
+@pytest.fixture(autouse=True)
+def isolate_rlm_logger():
+    """Drop the `rlm` logger's handlers after each test.
+
+    Any test that runs the CLI installs a handler pointing at pytest's captured
+    stderr. That stream is closed when the test ends, so a later test that logs
+    would write to a dead file object.
+    """
+    import logging
+
+    yield
+    logging.getLogger("rlm").handlers.clear()
+
+
 @pytest.fixture
 def settings() -> Settings:
     """Defaults, with a placeholder key so nothing needs a real one."""
-    return load_settings(tokenizer="heuristic", openai_api_key="test-key-not-real")
+    return load_settings(tokenizer="heuristic", api_key="test-key-not-real")
 
 
 def make_settings(**overrides) -> Settings:
     overrides.setdefault("tokenizer", "heuristic")
-    overrides.setdefault("openai_api_key", "test-key-not-real")
+    overrides.setdefault("api_key", "test-key-not-real")
     return load_settings(**overrides)
 
 

@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Sequence
 
 from app import __version__
-from app.config import ConfigError, Settings, load_settings
-from app.loaders import UnsupportedFormatError, load_document
+from app.config import PROVIDERS, ConfigError, Settings, load_settings
+from app.loaders import UnsupportedFormatError, load_documents
 from app.llm.base import LLMError, LLMClient
 from app.llm.mock import DemoLLMClient
 from app.models import Document, RLMResult
@@ -25,7 +25,13 @@ from app.rlm.context import render_tree
 from app.rlm.engine import RLMEngine
 from app.trace import Tracer, configure_logging
 
-DEFAULT_DOC = "test_files/erp-ai-capabilities.md"
+TEST_FILES = Path("test_files")
+DEFAULT_DOC = TEST_FILES / "erp-ai-capabilities.md"
+ALL_DOCS = [
+    TEST_FILES / "erp-ai-capabilities.md",
+    TEST_FILES / "WhatsApp Architecture and Technology Deep Dive.pdf",
+    TEST_FILES / "knowledge-product-pakistan.docx",
+]
 
 _BANNER = """RLM Demo -- Recursive Language Model
 ===================================="""
@@ -40,14 +46,32 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""examples:
   python -m app --mock                       run the whole flow offline, no API key
   python -m app --question "Which ERP is most open to third-party agents?"
-  python -m app --max-context-tokens 20000   large window -> single-call base case
+  python -m app --all-docs --question "..."  merge every sample file into one corpus
+  python -m app --doc a.md --doc b.pdf -Q "..."   merge specific files
+  python -m app --provider gemini -Q "..."   pick a vendor explicitly
   python -m app --show-tree                  print the chunk tree and exit
   python -m app --json --question "..." | jq .stats
 """,
     )
-    parser.add_argument("--doc", default=DEFAULT_DOC, help=f"document to query (default: {DEFAULT_DOC})")
+    parser.add_argument(
+        "--doc",
+        action="append",
+        metavar="PATH",
+        help=f"document to query; repeat to merge several into one corpus "
+        f"(default: {DEFAULT_DOC.as_posix()})",
+    )
+    parser.add_argument(
+        "--all-docs",
+        action="store_true",
+        help="query every sample file in test_files/ as a single merged corpus",
+    )
     parser.add_argument("--question", "-Q", help="ask one question and exit; omit for an interactive session")
-    parser.add_argument("--model", help="model name (default: gpt-4o-mini, or RLM_MODEL)")
+    parser.add_argument(
+        "--provider",
+        choices=sorted(PROVIDERS),
+        help="model vendor (default: auto-detected from whichever API key is set)",
+    )
+    parser.add_argument("--model", help="model name (default: the provider's own default, or RLM_MODEL)")
 
     limits = parser.add_argument_group("recursion budget")
     limits.add_argument(
@@ -72,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _settings_from(args: argparse.Namespace) -> Settings:
     overrides = {
+        "provider": args.provider,
         "model": args.model,
         "max_context_tokens": args.max_context_tokens,
         "chunk_target_tokens": args.chunk_target_tokens,
@@ -92,9 +117,17 @@ def _build_client(args: argparse.Namespace, settings: Settings) -> LLMClient | N
         return DemoLLMClient()
     if not settings.has_api_key:
         return None
-    from app.llm import build_openai_client
+    from app.llm import build_client
 
-    return build_openai_client(settings.openai_api_key, settings.model, settings.request_timeout)
+    return build_client(settings)
+
+
+def _doc_paths(args: argparse.Namespace) -> list[Path]:
+    if args.all_docs:
+        return list(ALL_DOCS)
+    if args.doc:
+        return [Path(p) for p in args.doc]
+    return [DEFAULT_DOC]
 
 
 # --------------------------------------------------------------------------
@@ -209,9 +242,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level, stream=sys.stderr)
     tracer = Tracer(logging.getLogger("rlm"), enabled=not args.quiet)
 
-    doc_path = Path(args.doc)
     try:
-        document = load_document(doc_path)
+        document = load_documents(_doc_paths(args))
     except (FileNotFoundError, UnsupportedFormatError, ValueError) as exc:
         print(f"could not load document: {exc}", file=sys.stderr)
         return 2
@@ -227,10 +259,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{exc}", file=sys.stderr)
         return 2
     if client is None:
+        keys = " or ".join(sorted(p.env_key for p in PROVIDERS.values()))
         print(
-            "No OPENAI_API_KEY found.\n"
-            "  Copy .env.example to .env and set your key, or run with --mock "
-            "to use the offline demo client.",
+            f"No API key found. Set {keys} in .env,\n"
+            "  or run with --mock to use the offline demo client.",
             file=sys.stderr,
         )
         return 2
@@ -241,9 +273,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.as_json:
             print(_BANNER)
             print(f"\nDocument: {_short(document.path)}  ({document.total_tokens:,} tokens)")
+            engine_label = "mock (offline)" if args.mock else f"{settings.provider}/{settings.model}"
+            print(f"Model: {engine_label}")
             print(
                 f"Working budget: {settings.max_context_tokens:,} document tokens per call"
-                + ("  [mock]" if args.mock else "")
             )
         return repl(engine, document, args.as_json)
 
