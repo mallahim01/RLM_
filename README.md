@@ -15,6 +15,9 @@ Every reasoning step therefore happens in a **small, focused context**, no matte
 - [Background: the RLM paper](#background-the-rlm-paper)
 - [Why this matters even when the document fits](#why-this-matters-even-when-the-document-fits)
 - [The numbers](#the-numbers)
+  - [Reported in the paper](#reported-in-the-paper)
+  - [Measured in this repository](#measured-in-this-repository)
+  - [One verified live run](#one-verified-live-run)
 - [Architecture](#architecture)
   - [System overview](#system-overview)
   - [Context isolation — what each call sees](#context-isolation--what-each-call-sees)
@@ -26,6 +29,7 @@ Every reasoning step therefore happens in a **small, focused context**, no matte
 - [Install](#install)
 - [Configuration](#configuration)
 - [Running it](#running-it)
+  - [Several documents at once](#several-documents-at-once)
 - [Tests](#tests)
 - [Relationship to the paper](#relationship-to-the-paper)
 - [Design decisions](#design-decisions)
@@ -301,7 +305,8 @@ app/
 ├── trace.py            Tracer -- emits [RLM] lines AND records the structured trace
 ├── llm/
 │   ├── base.py         LLMClient protocol, JSON extraction ladder, repair retry
-│   ├── openai_client.py  the only file that imports the OpenAI SDK
+│   ├── openai_client.py  the only file that imports an SDK; serves any
+│   │                     OpenAI-compatible endpoint, which is how Gemini works
 │   └── mock.py         test doubles + the offline client behind --mock
 ├── loaders/
 │   ├── _structure.py   shared heading-stack logic + level normalisation
@@ -424,7 +429,9 @@ pip install -r requirements.txt
 cp .env.example .env               # Windows: Copy-Item .env.example .env
 ```
 
-Five dependencies: `openai`, `python-dotenv`, `tiktoken`, `pypdf`, and `pytest`. You can skip the API key entirely and run with `--mock`.
+Then put **either** an `OPENAI_API_KEY` or a `GEMINI_API_KEY` in `.env` — whichever you set selects the provider. Or skip the key entirely and run everything with `--mock`.
+
+Five dependencies: `openai`, `python-dotenv`, `tiktoken`, `pypdf`, and `pytest`. Supporting Gemini added none of them — it speaks the same API through a different base URL.
 
 ---
 
@@ -558,7 +565,7 @@ The REPL approach is strictly more general; for the real thing use [their implem
 - **Latency, not just calls.** Sibling sections are inspected sequentially. Wall-clock is the real cost here; token cost is already favourable. Parallel inspection is the obvious fix.
 - **The router can be wrong.** It chooses from headings and ~140-character previews. A fact under a misleading heading with an unrevealing opening may not be found. Hallucinated ids are dropped safely, but a *plausible wrong* choice is just a wrong answer.
 - **No caching or persistence.** Every question re-chunks and re-routes from scratch. There is no database, by design.
-- **Single document.** The engine navigates one document's tree; a large corpus would want another level above this one.
+- **Corpus scale is untested past a few files.** Several documents merge into one tree and route correctly (verified on three), but nothing here has been run against thousands of files, where the top level would need its own pre-filtering rather than one entry per document.
 - **Findings are not cross-checked.** If two sections disagree, synthesis sees both and does its best. There is no contradiction detection.
 
 ---
